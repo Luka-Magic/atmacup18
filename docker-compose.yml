@@ -1,0 +1,30 @@
+services:
+  workspace:
+    container_name: atmacup18
+    image: ${USERNAME}/atmacup18:v1
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        - UID=${UID}
+        - GID=${GID}
+        - USERNAME=${USERNAME}
+        - GROUPNAME=${GROUPNAME}
+    ports:
+        - 8888:8888
+    command: jupyter notebook --port=8888 --ip=0.0.0.0 --allow-root
+    volumes:
+      - type: bind
+        source: ../
+        target: /workspace
+    environment:
+      TZ: Asia/Tokyo
+    tty: true
+    shm_size: '2gb'
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: nvidia
+                      count: 1
+                      capabilities: [gpu]
