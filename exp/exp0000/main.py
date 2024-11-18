@@ -158,11 +158,12 @@ class Atma18Model(nn.Module):
         self.model = timm.create_model(name, pretrained=True, num_classes=0, in_chans=img_in_chans)
         # self.mlp  = nn.Linear(meta_in_chans, meta_out_chans)
         self.mlp = nn.Sequential(
-            nn.Linear(meta_in_chans, meta_out_chans)
+            nn.Linear(meta_in_chans, 128),
+            nn.ReLU(),
+            nn.Linear(128, meta_out_chans),
         )
         self.relu = nn.ReLU()
         self.fc = nn.Linear(self.model.num_features + meta_out_chans, output_dim)
-        # self.fc_wo_meta = nn.Linear(self.model.num_features, output_dim)
 
     def feature(self, x):
         x = self.model(x)
@@ -175,8 +176,6 @@ class Atma18Model(nn.Module):
         x = torch.cat([x, meta], dim=-1)
         x = self.relu(x)
         x = self.fc(x)
-        # x = self.model(x)
-        # x = self.fc_wo_meta(x)
         return x
 
 def get_lr(optimizer):
@@ -296,6 +295,31 @@ def valid_one_epoch(
         pbar.set_postfix(OrderedDict(loss=valid_losses.avg, score=valid_score.avg))
     return valid_losses.avg, valid_score.avg
 
+
+def test_function(
+    cfg,
+    fold: int,
+    save_dir: Path,
+    test_loader: DataLoader,
+    model: nn.Module,
+    device: torch.device,
+):
+    model.eval()
+    preds = []
+
+    pbar = tqdm(enumerate(test_loader), total=len(test_loader))
+    for step, (imgs, metas) in pbar:
+        imgs = imgs.to(device).float()
+        metas = metas.to(device).float()
+
+        with torch.no_grad():
+            output = model(imgs, metas)
+            preds.append(output.detach().cpu().numpy())
+    preds = np.concatenate(preds)
+    return preds
+
+
+
 def send_image(df):
     intrinsic_matrix = np.array([[226.16438356, 0., 63.62426614],
                              [0., 224.82352941, 11.76],
@@ -348,7 +372,6 @@ def send_image(df):
             )
         except:
             pass
-            
         try:
             trajectory_pred_img = project_trajectory_to_image_coordinate_system(trajectory_pred, intrinsic_matrix)
             ax.plot(
@@ -392,27 +415,7 @@ def send_image(df):
             # cacheの解法
             gc.collect()
 
-def test_function(
-    cfg,
-    fold: int,
-    save_dir: Path,
-    test_loader: DataLoader,
-    model: nn.Module,
-    device: torch.device,
-):
-    model.eval()
-    preds = []
 
-    pbar = tqdm(enumerate(test_loader), total=len(test_loader))
-    for step, (imgs, metas) in pbar:
-        imgs = imgs.to(device).float()
-        metas = metas.to(device).float()
-
-        with torch.no_grad():
-            output = model(imgs, metas)
-            preds.append(output.detach().cpu().numpy())
-    preds = np.concatenate(preds)
-    return preds
 
 
 @hydra.main(config_path='config', config_name='config')
@@ -423,13 +426,14 @@ def main(cfg):
     raw_test_df = pd.read_csv(ORIGINAL_DATA_DIR / 'test_features.csv')
     ss_df = pd.read_csv(ORIGINAL_DATA_DIR / 'atmaCup18__sample_submit.csv')
 
+    seed_everything(cfg.seed)
+
     df, test_df = create_features_with_all_data(raw_train_df, raw_test_df)
 
     device = torch.device(cfg.device)
     
     test_cfg = cfg.infer
     oof_cfg = cfg.oof
-
     if cfg.train:
         for fold in cfg.use_folds:
             wandb.config = OmegaConf.to_container(
@@ -444,7 +448,6 @@ def main(cfg):
                 settings=wandb.Settings(disable_git=True, save_code=False)
             )
             wandb.config.fold = fold
-            seed_everything(cfg.seed)
             
             best_info = {
                 'epoch': -1,
@@ -457,6 +460,7 @@ def main(cfg):
             valid_df = create_features(valid_df)
 
             feat_columns = set(train_df.columns) - set(ID_COLUMNS + TARGET_COLUMNS)
+            feat_columns = sorted(list(feat_columns))
 
             # 特徴量カラムは正規化
             # for col in feat_columns:
@@ -584,6 +588,8 @@ def main(cfg):
             _, valid_df = split_data(cfg, df, fold)
             valid_feat_df = create_features(valid_df)
             feat_columns = set(valid_feat_df.columns) - set(ID_COLUMNS + TARGET_COLUMNS)
+            feat_columns = sorted(list(feat_columns))
+
             model = Atma18Model(
                 name=cfg.model_name,
                 img_in_chans=cfg.img_in_chans,
@@ -643,7 +649,8 @@ def main(cfg):
 
     if test_cfg.test:
         test_df = create_features(test_df)
-        feat_columns = set(test_df.columns) - set(ID_COLUMNS)
+        feat_columns = set(test_df.columns) - set(ID_COLUMNS + TARGET_COLUMNS)
+        feat_columns = sorted(list(feat_columns))
 
         # foldで平均を取る
         assert len(test_cfg.use_folds) > 0, f"test_cfg.use_fold must be set"
@@ -684,10 +691,8 @@ def main(cfg):
             )
             del model, test_ds, test_dl
             gc.collect()
-            test_preds.append(test_pred * test_cfg.model_weight[i])
-            del model, test_ds, test_dl
-            gc.collect()
             torch.cuda.empty_cache()
+            test_preds.append(test_pred * test_cfg.model_weight[i])
         
         # model_weightで重み付け
         test_preds = np.sum(test_preds, axis=0) / np.sum(test_cfg.model_weight)
