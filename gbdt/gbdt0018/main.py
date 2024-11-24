@@ -1,6 +1,5 @@
 import hydra
 import re
-import gc
 import wandb
 import pandas as pd
 import json
@@ -61,11 +60,7 @@ def common_preprocess(target_df: pd.DataFrame) -> Union[pd.DataFrame, List[str]]
     - boolのcolをintに変換
     - scene, scene_sec, scene_countを追加
     '''
-    num_cols = []
-    
-    # brake消す
-    if 'brake' in target_df.columns:
-        target_df.drop('brake', axis=1, inplace=True)
+    num_columns = ['vEgo', 'aEgo', 'steeringAngleDeg', 'steeringTorque', 'brakePressed', 'gas', 'gasPressed',  'leftBlinker', 'rightBlinker']
     
     # boolのcol
     bool_columns = ['brakePressed', 'gasPressed', 'leftBlinker', 'rightBlinker']
@@ -74,64 +69,50 @@ def common_preprocess(target_df: pd.DataFrame) -> Union[pd.DataFrame, List[str]]
     target_df['scene'] = target_df['ID'].str.split('_').str[0]
     target_df['scene_sec'] = target_df['ID'].str.split('_').str[1].astype(int)
 
-    target_df['ori_idx'] = target_df.index
-    
-    # sceneでsort
-    target_df.sort_values(by=['scene', 'scene_sec'], inplace=True)
-    # 1. sceneの特徴量
     count_df = target_df.groupby('scene').size()
     target_df['scene_count'] = target_df['scene'].map(count_df)
-    
-    scene_sec_from_zero = target_df.groupby('scene').apply(lambda x:x['scene_sec'] - x['scene_sec'].min()).reset_index()['scene_sec'].values
-    target_df['scene_sec_from_zero'] = scene_sec_from_zero
-    target_df['scene_sec_rank'] = target_df.groupby('scene')['scene_sec'].rank(method='first').astype(int)
-    
-    num_cols.append(['scene_sec', 'scene_count', 'scene_sec_from_zero', 'scene_sec_rank'])
+    num_columns.append(['scene_sec', 'scene_count'])
     
     # 2. steeringAngleDeg を度からラジアンに変換
     target_df["steeringAngleRad"] = np.deg2rad(target_df["steeringAngleDeg"])
-    num_cols.append("steeringAngleRad")
+    num_columns.append("steeringAngleRad")
 
     # 3. 三角関数の特徴量を作成
     target_df["steeringAngle_sin"] = np.sin(target_df["steeringAngleRad"])
     target_df["steeringAngle_cos"] = np.cos(target_df["steeringAngleRad"])
-    num_cols.extend(["steeringAngle_sin", "steeringAngle_cos"])
+    num_columns.extend(["steeringAngle_sin", "steeringAngle_cos"])
 
     # 4. 交互作用特徴量を作成
     target_df["speed_steering"] = target_df["vEgo"] * target_df["steeringAngleRad"]  # 速度とステアリング角度の組み合わせ
     target_df["acc_steeringTorque"] = target_df["aEgo"] * target_df["steeringTorque"]  # 加速度とステアリングトルクの組み合わせ
-    num_cols.extend(["speed_steering", "acc_steeringTorque"])
+    num_columns.extend(["speed_steering", "acc_steeringTorque"])
 
     # 5. 対数変換
     target_df["vEgo_positive"] = target_df["vEgo"].clip(lower=0) + 1e-6
     target_df["log_vEgo"] = np.log(target_df["vEgo_positive"])
-    num_cols.append("log_vEgo")
+    num_columns.append("log_vEgo")
 
     # 6. 加速度の変化率
     target_df["jerk"] = target_df.groupby("scene")["aEgo"].diff()
-    num_cols.append("jerk")
+    num_columns.append("jerk")
 
     # 7. ステアリング角度とトルクの変化率
     target_df["steeringAngleRate"] = target_df.groupby("scene")["steeringAngleRad"].diff()
     target_df["steeringTorqueRate"] = target_df.groupby("scene")["steeringTorque"].diff()
-    num_cols.extend(["steeringAngleRate", "steeringTorqueRate"])
+    num_columns.extend(["steeringAngleRate", "steeringTorqueRate"])
 
     # 8. 二乗・絶対値特徴量
     target_df["vEgo_squared"] = target_df["vEgo"] ** 2
     target_df["steeringAngleRad_squared"] = target_df["steeringAngleRad"] ** 2
     target_df["aEgo_squared"] = target_df["aEgo"] ** 2
-    num_cols.extend(["vEgo_squared", "steeringAngleRad_squared", "aEgo_squared"])
+    num_columns.extend(["vEgo_squared", "steeringAngleRad_squared", "aEgo_squared"])
 
     # 9. 移動平均や移動和
     target_df["vEgo_roll_mean"] = target_df.groupby("scene")["vEgo"].rolling(window=2, min_periods=1).mean().reset_index(0, drop=True)
     target_df["aEgo_roll_mean"] = target_df.groupby("scene")["aEgo"].rolling(window=2, min_periods=1).mean().reset_index(0, drop=True)
-    num_cols.extend(["vEgo_roll_mean", "aEgo_roll_mean"])
+    num_columns.extend(["vEgo_roll_mean", "aEgo_roll_mean"])
     
-    # IDでsortしなおす
-    target_df = target_df.sort_values('ori_idx').reset_index(drop=True)
-    target_df = target_df.drop('ori_idx', axis=1)
-    
-    return target_df, num_cols
+    return target_df, num_columns
 
 # 信号機に関する特徴量を追加
 def add_traffic_light_feature(
@@ -143,62 +124,36 @@ def add_traffic_light_feature(
     ----
     - 信号機の数をを追加 (jsonの中のlistの長さ)
     '''
-    traffic_lights_df = pd.read_csv(CREATED_DATA_DIR / 'data0005' / 'traffic_light.csv')
+    tl_dir = ORIGINAL_DATA_DIR / 'traffic_lights'
+    tl_json_paths = list(tl_dir.glob('*.json'))
+
+    traffic_light_columns = []
+
+    traffic_lights = []
+    id_class_list = []
+    for tl_json_path in tqdm(tl_json_paths, total=len(tl_json_paths)):
+        tl_id = tl_json_path.stem
+        traffic_light = json.load(open(tl_json_path))
+
+        traffic_lights.append(traffic_light)
+
+        for traffic_light in traffic_light:
+            id_class_list.append((tl_id.split('.')[0], traffic_light['class']))
+
+    # 信号機の数
+    counts = [len(traffic_light) for traffic_light in traffic_lights]
     
-    # classという名前があれなのでclass_nameに変える
-    traffic_lights_df.rename(columns={'class': 'class_name'}, inplace=True)
+    # traffic_lights_df = pd.DataFrame(id_class_list, columns=['ID', 'class'])
 
-    traffic_lights_df['bbox_c_x'] = traffic_lights_df.apply(lambda x:(x['bbox_2'] + x['bbox_0']) / 2 , axis=1)
-    traffic_lights_df['bbox_c_y'] = traffic_lights_df.apply(lambda x:(x['bbox_3'] + x['bbox_1']) / 2 , axis=1)
-    traffic_lights_df['bbox_aspect'] = traffic_lights_df.apply(lambda x:(x['bbox_2'] - x['bbox_0']) / (x['bbox_3'] - x['bbox_1']) , axis=1)
-    traffic_lights_df['bbox_area'] = traffic_lights_df.apply(lambda x:(x['bbox_2'] - x['bbox_0']) * (x['bbox_3'] - x['bbox_1']), axis=1)
+    tl_ids = [json_path.stem for json_path in tl_json_paths]
+    traffic_lights_df = pd.DataFrame({
+        'ID': tl_ids,
+        'traffic_lights_counts': counts
+    })
 
-    # 面積が30以上のものを削除
-    traffic_lights_df = traffic_lights_df.query('bbox_area < 30').reset_index(drop=True)
-
-    # 信号の数
-    tl_count = traffic_lights_df.groupby(['ID']).size().reset_index().rename(columns={0: 'n_traffic_lights'})
-    traffic_lights_df = traffic_lights_df.merge(tl_count, on='ID')
-
-    # bboxをstrにして一意に
-    traffic_lights_df['bbox_str'] = traffic_lights_df.apply(lambda x:f'[{x["bbox_0"]:.3f}, {x["bbox_1"]:.3f}, {x["bbox_2"]:.3f}, {x["bbox_3"]:.3f}]', axis=1)
-
-    # id, bbox, classでsort
-    traffic_lights_df.sort_values(by=['ID', 'bbox_str', 'class_name'], inplace=True)
-
-    # 一つの信号機に対するclassの組み合わせを取得
-    same_tl_df = traffic_lights_df.groupby(['ID', 'bbox_str'])['class_name'].unique().reset_index().rename(columns={'class_name': 'class_unique'})
-
-    # 一つの信号機に対するclassの組み合わせの個数を取得
-    same_tl_size_df = traffic_lights_df.groupby(['ID', 'bbox_str'])['class_name'].nunique().reset_index().rename(columns={'class_name': 'n_signs'})
-
-    # 一つの信号の情報をマージ
-    traffic_lights_df = traffic_lights_df.merge(same_tl_df, on=['ID', 'bbox_str'])
-    traffic_lights_df = traffic_lights_df.merge(same_tl_size_df, on=['ID', 'bbox_str'])
-
-    # IDに対して最大の面積の信号のみ使う
-    area_df = traffic_lights_df.drop_duplicates(['ID', 'bbox_str'])[['ID', 'bbox_str', 'bbox_area']]
-    area_df = area_df.groupby(['ID'])[['bbox_area']].rank(ascending=False).astype(int)
-    traffic_lights_df = traffic_lights_df.loc[area_df.query('bbox_area == 1').index]
-    
-    # 必要な特徴量に厳選
-    tl_feature_df = traffic_lights_df[['ID', 'bbox_c_x', 'bbox_c_y', 'bbox_aspect', 'bbox_area', 'n_signs', 'n_traffic_lights', 'class_unique']].copy()
-    # 最大面積の信号機の各信号を特徴量に
-    sign_columns = ['green', 'yellow', 'red', 'straight', 'left', 'right', 'empty', 'other']
-    tl_feature_df.reset_index(drop=True, inplace=True)
-    
-    # 各信号があるかをチェック
-    tl_feature_df[[f'sign_{c}' for c in sign_columns]] = 0
-    for i, row in tqdm(tl_feature_df.iterrows(), total=len(tl_feature_df)):
-        for class_name in row['class_unique']:
-            tl_feature_df.loc[i, f'sign_{class_name}'] = 1
-    tl_feature_df.drop('class_unique', axis=1, inplace=True)
-
-    traffic_columns = [c for c in tl_feature_df.columns if c != 'ID']
-    
-    train_df = pd.merge(train_df, tl_feature_df, on='ID', how='left')
-    test_df = pd.merge(test_df, tl_feature_df, on='ID', how='left')
-    return train_df, test_df, traffic_columns
+    train_df = pd.merge(train_df, traffic_lights_df, on='ID', how='left')
+    test_df = pd.merge(test_df, traffic_lights_df, on='ID', how='left')
+    return train_df, test_df
 
 
 # epipolarの特徴量を追加
@@ -278,7 +233,7 @@ def add_oof_feature(
 
         img_submission_df = pd.read_csv(img_submission_path)
         target_columns = TARGET_COLUMNS.copy()
-
+        
         if oof_v:
             # 速度を求める
             for i in range(6):
@@ -310,11 +265,8 @@ def add_oof_feature(
 # shift特徴量を追加
 def make_shift_feature(target_df, use_feat_columns):
     shift_count = 1
-    shift_diff_count = 1
     shift_range = list(range(-shift_count, shift_count+1))
     shift_range = [x for x in shift_range if x != 0]
-    shift_diff_range = list(range(-shift_diff_count, shift_diff_count+1))
-    shift_diff_range = [x for x in shift_diff_range if x != 0]
 
     target_df['ori_idx'] = target_df.index
 
@@ -326,9 +278,7 @@ def make_shift_feature(target_df, use_feat_columns):
             shift_col = f'{col}_shift{shift}'
             target_df[shift_col] = target_df.groupby('scene')[col].shift(shift)
             shift_feat_columns.append(shift_col)
-    
-    for shift in shift_diff_range:
-        for col in use_feat_columns:
+
             diff_col = f'{col}_diff{shift}'
             target_df[diff_col] = target_df[col] - target_df[shift_col]
             shift_feat_columns.append(diff_col)
@@ -442,7 +392,7 @@ def get_model(cfg, model_name, cat_label_columns):
         # 'depth': cfg.max_depth,
         # 'l2_leaf_reg': cfg.min_data_in_leaf,
         # 'subsample': cfg.subsample,
-        'boosting_type': cfg.boosting_type,
+        'boosting_type': 'Plain',
         # 'bootstrap_type': 'Bernoulli',
         'cat_features': cat_label_columns,
         'eval_metric': 'RMSE',
