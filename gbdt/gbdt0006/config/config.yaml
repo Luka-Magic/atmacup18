@@ -1,0 +1,49 @@
+#####   DEFAULT   ####################################
+train: false
+oof: false
+
+#####   BASIC   ######################################
+wandb: false
+debug: false
+wandb_project: atmacup18_gbdt
+seed: 77
+n_folds: 5
+
+#####   FEATURE   ####################################
+use_pre_pred: false
+use_traffic_light: true
+use_epipolar: false
+
+#####   OOF   ########################################
+oof_ids:
+  - exp0002
+  - exp0004
+  - exp0005
+  - exp0006
+oof_v: true
+oof_feature: false
+oof_shift: false
+
+#####   LightGBM   ###################################
+boosting_type: gbdt
+learning_rate: 0.01
+num_leaves: 64
+max_depth: -1
+min_data_in_leaf: 64
+subsample: 0.4
+colsample_bytree: 0.4
+
+#####   HYDRA   ######################################
+hydra:
+    run:
+      dir: ./
+    output_subdir: null
+    job_logging:
+      version: 1
+      handlers:
+        console:
+          class: logging.StreamHandler
+          stream: ext://sys.stdout
+      root:
+        handlers: [console]
+      disable_existing_loggers: false

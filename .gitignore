@@ -9,3 +9,5 @@ __pycache__
 
 
 *.csv
+catboost_info
+*.png

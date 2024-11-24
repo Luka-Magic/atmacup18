@@ -1,0 +1,74 @@
+#####   DEFAULT   ####################################
+train: false
+
+oof: false
+oof_save_image: false
+oof_feature: false
+
+test: false
+test_feature: true
+ensemble_folds: [0, 1, 2, 3, 4]
+ensemble_model_weight: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+#####   BASIC   ######################################
+wandb: false
+debug: false
+wandb_project: atmacup18
+seed: 77
+n_epochs: 15
+n_folds: 5
+use_folds: [0, 1, 2, 3, 4]
+use_amp: true
+num_workers: 6
+device: cuda
+
+#####   DATA   ######################################
+img_w: 192
+img_h: 192
+train_bs: 128
+valid_bs: 256
+use_traffic_light: true
+
+use_depth: true
+depth_dir_id: data0001
+
+use_vehicle_segmentation: true
+vehicle_segmentation_dir_id: data0003
+
+#####   MODEL   ######################################
+model_name: resnet18
+img_in_chans: 9
+output_dim: 18
+meta_out_chans: 128
+
+##### Optimizer ######################################
+optimizer: AdamW
+lr: 5e-3
+weight_decay: 1e-6
+
+##### Scheduler ######################################
+scheduler: OneCycleLR #, huggingface_scheduler
+scheduler_step_time: steps
+T_0: ${n_epochs} # CAWR
+T_mult: 1 # CAWR
+eta_min: 1e-5 # CAWR
+
+pct_start: 0.1 # OCLR
+div_factor: 25. # OCLR
+final_div_factor: 100. # OCLR
+
+
+#####   HYDRA   ######################################
+hydra:
+    run:
+      dir: ./
+    output_subdir: null
+    job_logging:
+      version: 1
+      handlers:
+        console:
+          class: logging.StreamHandler
+          stream: ext://sys.stdout
+      root:
+        handlers: [console]
+      disable_existing_loggers: false

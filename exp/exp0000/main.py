@@ -57,7 +57,7 @@ def split_data(cfg, df, fold):
         if ifold == fold:
             train_df = df.iloc[train_index]
             valid_df = df.iloc[valid_index]
-        break
+            break
     return train_df, valid_df
 
 

@@ -35,7 +35,7 @@
   ```
 5. 検証
   ```sh
-  # workspace内にいるのでexp/expxxxxに移動してmain.py
-  cd exp/exp0000
+  # workspace内にいるのでsrc/exp/expxxxxに移動してmain.py
+  cd src/exp/exp0000
   python main.py train=true
   ```

@@ -20,7 +20,7 @@ services:
     environment:
       TZ: Asia/Tokyo
     tty: true
-    shm_size: '2gb'
+    shm_size: '16gb'
     deploy:
         resources:
             reservations:
