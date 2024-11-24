@@ -387,21 +387,20 @@ def add_feature_block(
 
 ## ====================================================
 
-import xgboost as xgb
+from catboost import CatBoostRegressor
 from pathlib import Path
 
-# XGBoostモデル
-class XGBoost:
+class CatBoost:
     def __init__(
             self,
-            xgb_params,
+            cat_params,
             save_dir=None,
-            model_name='xgb',
-            stopping_rounds=50
+            model_name='catboost',
+            stopping_rounds=100
         ) -> None:
 
         self.save_dir = save_dir
-        self.xgb_params = xgb_params
+        self.cat_params = cat_params
 
         # saveの切り替え用
         self.model_name = model_name
@@ -412,54 +411,48 @@ class XGBoost:
         eval_set = fit_params['eval_set']
         X_val, y_val = eval_set[0]
 
-        del fit_params['eval_set']
-        train_dataset = xgb.DMatrix(data=x_train, label=y_train)
-        val_dataset = xgb.DMatrix(data=X_val, label=y_val)
-
-        self.model = xgb.train(
-            params=self.xgb_params,
-            dtrain=train_dataset,
-            evals=[(train_dataset, 'train'), (val_dataset, 'validation')],
+        self.model = CatBoostRegressor(
+            **self.cat_params,
+            iterations=fit_params.get('iterations', 100000),
             early_stopping_rounds=self.stopping_rounds,
-            verbose_eval=500,
-            **fit_params
+            verbose=500
+        )
+
+        self.model.fit(
+            x_train, y_train,
+            eval_set=(X_val, y_val),
+            use_best_model=True
         )
 
     def save(self, fold):
-        save_to = self.save_dir / f'xgb_fold_{fold}_{self.model_name}.json'
+        save_to = self.save_dir / f'catboost_fold_{fold}_{self.model_name}.cbm'
         self.model.save_model(str(save_to))
 
     def predict(self, x):
-        dmatrix = xgb.DMatrix(data=x)
-        return self.model.predict(dmatrix)
+        return self.model.predict(x)
 
     def predict_proba(self, x):
-        dmatrix = xgb.DMatrix(data=x)
-        return self.model.predict(dmatrix)  # For binary/multiclass classification
+        return self.model.predict(x)   # For binary/multiclass classification
 
-def get_model(
-        cfg,
-        model_name
-    ):
-    xgb_params = {
-        'objective': 'reg:squarederror',  # regression objective
-        'booster': cfg.boosting_type,
-        'verbosity': 0,
-        'n_jobs': 8,
-        'seed': cfg.seed,
-        'eta': cfg.eta,
-        # 'num_class': CFG.num_class, # multiclassなら必要
-        'eval_metric': 'mae',
-        'max_depth': cfg.max_depth,
-        'subsample': cfg.subsample,
-        'colsample_bytree': cfg.colsample_bytree,
-        'min_child_weight': cfg.min_data_in_leaf,
+def get_model(cfg, model_name, cat_label_columns):
+    cat_params = {
+        'loss_function': 'RMSE',  # 回帰の場合はMAEやRMSEを指定
+        'random_seed': cfg.seed,
+        'learning_rate': cfg.learning_rate,
+        # 'depth': cfg.max_depth,
+        # 'l2_leaf_reg': cfg.min_data_in_leaf,
+        # 'subsample': cfg.subsample,
+        'boosting_type': cfg.boosting_type,
+        # 'bootstrap_type': 'Bernoulli',
+        'cat_features': cat_label_columns,
+        'eval_metric': 'RMSE',
+        'task_type': 'GPU',
     }
     save_log_dir = SAVE_DIR / 'log'
     save_log_dir.mkdir(exist_ok=True, parents=True)
 
-    model = XGBoost(
-                xgb_params=xgb_params,
+    model = CatBoost(
+                cat_params=cat_params,
                 save_dir=save_log_dir,
                 model_name=model_name
     )
@@ -468,7 +461,7 @@ def get_model(
 
 def get_fit_params(cfg, model_name):
     params = {
-        'num_boost_round': 100000
+        # 'iterations': 100000
     }
     return params
 
@@ -621,6 +614,9 @@ def main(cfg):
                     cat_count_columns=cat_count_columns,
                     cat_te_columns=cat_te_columns
                 )
+                
+                cat_columns = train_feat.select_dtypes(include=[object, bool, int]).columns.to_list()
+                print(f'cat_columns:', cat_columns)
 
                 print(f'feature columns:', train_feat.columns)
                 print(f'num feature columns:', len(train_feat.columns))
@@ -638,25 +634,24 @@ def main(cfg):
                     y_train = train_df.loc[train_indices, target_column]
                     y_valid = train_df.loc[valid_indices, target_column]
 
-                    model_name = f'xgb_{target_column}'  # モデル名をXGBoost用に変更
-                    model = get_model(cfg, model_name)
+                    model_name = f'catboost_{target_column}'  # モデル名をCatBoost用に変更
+                    model = get_model(cfg, model_name, cat_columns)
 
                     fit_params = get_fit_params(cfg, model_name)
 
                     fit_params_fold = fit_params.copy()
                     fit_params_fold['eval_set'] = [(x_valid, y_valid)]
 
-                    model.fit(x_train, y_train, **fit_params_fold)
+                    model.fit(x_train, y_train, **fit_params_fold)  # トレーニング
 
+                    # モデルの保存が可能なら保存
                     if hasattr(model, 'save'):
                         model.save(fold)
 
-                    if hasattr(model, 'plot_importance'):
-                        model.plot_importance(fold)
-
+                    # 予測
                     oof_predictions[valid_indices, target_idx] = model.predict(x_valid)
                     test_predictions[:, target_idx] += model.predict(test_feat)
-
+                
                 eval_func = eval('mae')
                 score_fold = eval_func(y.loc[valid_indices, target_column].values, oof_predictions[valid_indices, target_idx])
                 print(f'fold: {fold}, column: {target_column}, score: {score_fold:<.4f}')
